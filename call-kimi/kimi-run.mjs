@@ -41,13 +41,10 @@ function runInteractive() {
 async function runPrompt() {
   const result = await runPromptOnce(cont);
   if (result.code !== 0) {
-    process.stderr.write(result.stderr);
     process.exit(result.code ?? 1);
   }
 
-  const { text, sessionId } = parsePromptJson(result.stdout);
-  process.stdout.write(text);
-  if (sessionId) printThinking(sessionId);
+  if (result.sessionId) printThinking(result.sessionId);
 }
 
 async function runPromptOnce(useContinue) {
@@ -56,24 +53,30 @@ async function runPromptOnce(useContinue) {
   a.push('--prompt', prompt, '--output-format', 'stream-json');
 
   const child = spawnKimi(a, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = '', stderr = '';
-  child.stdout.on('data', d => { stdout += d; });
-  child.stderr.on('data', d => { stderr += d; });
+  let rest = '', sessionId = null;
+  child.stdout.on('data', d => {
+    rest += d;
+    const lines = rest.split(/\r?\n/);
+    rest = lines.pop() ?? '';
+    for (const line of lines) sessionId = emitPromptLine(line, sessionId);
+  });
+  child.stderr.on('data', d => { process.stderr.write(d); });
 
   const code = await wait(child);
-  return { code, stdout, stderr };
+  if (rest.trim()) sessionId = emitPromptLine(rest, sessionId);
+  return { code, sessionId };
 }
 
-function parsePromptJson(s) {
-  let text = '', sessionId = null;
-  for (const line of s.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let m;
-    try { m = JSON.parse(line); } catch { continue; }
-    if (m.role === 'assistant' && typeof m.content === 'string') text += m.content;
-    if (m.type === 'session.resume_hint') sessionId = m.session_id || sessionId;
+function emitPromptLine(line, sessionId) {
+  if (!line.trim()) return sessionId;
+  let m;
+  try { m = JSON.parse(line); } catch {
+    process.stdout.write(`${line}\n`);
+    return sessionId;
   }
-  return { text, sessionId };
+  if (m.role === 'assistant' && typeof m.content === 'string') process.stdout.write(m.content);
+  if (m.type === 'session.resume_hint') sessionId = m.session_id || sessionId;
+  return sessionId;
 }
 
 function printThinking(sessionId) {
